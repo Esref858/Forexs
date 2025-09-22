@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="az">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Forex 24s — proqnoz</title>
+  <style>
+    body{font-family:Arial,sans-serif;background:#071226;color:#e6f0fa;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+    .card{width:820px;padding:20px;border-radius:12px;background:linear-gradient(180deg,#041428,#08263a);box-shadow:0 8px 30px rgba(0,0,0,.6)}
+    h1{margin:0 0 8px 0;font-size:20px}
+    .row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+    select,input,button{padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.06); background:#071a2a;color:#e6f0fa}
+    #chart{height:320px;background:#031520;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#4b6;text-align:center;line-height:1.4;}
+    .big{font-size:18px;margin-top:8px}
+    .warn{color:#f4b; font-size:13px; margin-top:8px}
+    label{font-size:14px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Forex 24s — sadə proqnoz (SMA/EMA)</h1>
+
+    <div class="row">
+      <label>Cütlük:
+        <select id="pair">
+          <option value="EUR/USD">EUR/USD</option>
+          <option value="USD/JPY">USD/JPY</option>
+          <option value="GBP/USD">GBP/USD</option>
+          <option value="AUD/USD">AUD/USD</option>
+        </select>
+      </label>
+
+      <label>Metod:
+        <select id="method">
+          <option value="sma">SMA</option>
+          <option value="ema">EMA</option>
+        </select>
+      </label>
+
+      <label>Pəncərə:
+        <input id="window" type="number" value="20" min="2" max="500" style="width:90px"/>
+      </label>
+
+      <label>AlphaVantage API açarı (istəyə bağlı):
+        <input id="avkey" type="text" placeholder="əgər varsa, buraya yapışdır" style="width:200px"/>
+      </label>
+
+      <button id="run">Məlumat al</button>
+      <button id="auto">Avto: bağlı</button>
+    </div>
+
+    <div id="chart">Qrafik (mətnlə vizualizasiya)</div>
+    <div id="info" class="big">—</div>
+    <div class="warn">Prototip: SMA/EMA strategiyası. Ticarət tövsiyyəsi deyil.</div>
+  </div>
+
+<script>
+const pairEl=document.getElementById('pair');
+const methodEl=document.getElementById('method');
+const winEl=document.getElementById('window');
+const avKeyEl=document.getElementById('avkey');
+const runBtn=document.getElementById('run');
+const info=document.getElementById('info');
+const chart=document.getElementById('chart');
+const autoBtn=document.getElementById('auto');
+
+let auto=false, autoInterval;
+
+function sma(arr,n){
+  if(arr.length<n) return null;
+  const res=[]; let sum=0;
+  for(let i=0;i<arr.length;i++){
+    sum+=arr[i];
+    if(i>=n) sum-=arr[i-n];
+    if(i>=n-1) res.push(sum/n);
+  }
+  return res;
+}
+
+function ema(arr,n){
+  if(arr.length<n) return null;
+  const k=2/(n+1);
+  const res=[];
+  let prev=arr.slice(0,n).reduce((a,b)=>a+b,0)/n;
+  res.push(prev);
+  for(let i=n;i<arr.length;i++){
+    prev=arr[i]*k + prev*(1-k);
+    res.push(prev);
+  }
+  return res;
+}
+
+function toAlphaPair(pair){const [a,b]=pair.split('/'); return {from:a.trim(), to:b.trim()};}
+
+async function fetchAlphaIntraday(pair,apikey){
+  const {from,to}=toAlphaPair(pair);
+  const interval='5min';
+  const url=`https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol=${from}&to_symbol=${to}&interval=${interval}&outputsize=compact&apikey=${apikey}`;
+  const r=await fetch(url);
+  if(!r.ok) throw new Error('AlphaVantage HTTP '+r.status);
+  const j=await r.json();
+  const key=Object.keys(j).find(k=>k.startsWith('Time Series'));
+  if(!key) throw new Error('AlphaVantage: intraday məlumat yoxdur');
+  const ts=j[key];
+  const entries=Object.keys(ts).map(t=>({t:new Date(t).getTime(), price:parseFloat(ts[t]['4. close'])}));
+  entries.sort((a,b)=>a.t-b.t);
+  return entries;
+}
+
+async function fetchExchangerateHost(pair){
+  const [base,quote]=pair.split('/').map(s=>s.trim());
+  const end=new Date();
+  const start=new Date(end.getTime()-5*24*60*60*1000); 
+  const fmt=d=>d.toISOString().slice(0,10);
+  const url=`https://api.exchangerate.host/timeseries?start_date=${fmt(start)}&end_date=${fmt(end)}&base=${quote}&symbols=${base}`;
+  const r=await fetch(url);
+  if(!r.ok) throw new Error('exchangerate.host HTTP '+r.status);
+  const j=await r.json();
+  if(!j.rates || Object.keys(j.rates).length===0) throw new Error('exchangerate.host: məlumat yoxdur');
+  const arr=Object.keys(j.rates).map(d=>({t:new Date(d).getTime(), price:1/j.rates[d][base]}));
+  arr.sort((a,b)=>a.t-b.t);
+  return arr;
+}
+
+async function fetchFrankfurter(pair){
+  const [base,quote]=pair.split('/').map(s=>s.trim());
+  const end=new Date();
+  const start=new Date(end.getTime()-5*24*60*60*1000);
+  const fmt=d=>d.toISOString().slice(0,10);
+  const url=`https://api.frankfurter.app/${fmt(start)}..${fmt(end)}?from=${quote}&to=${base}`;
+  const r=await fetch(url);
+  if(!r.ok) throw new Error('Frankfurter HTTP '+r.status);
+  const j=await r.json();
+  if(!j.rates || Object.keys(j.rates).length===0) throw new Error('Frankfurter: məlumat yoxdur');
+  const arr=Object.keys(j.rates).map(d=>({t:new Date(d).getTime(), price:1/j.rates[d][base]}));
+  arr.sort((a,b)=>a.t-b.t);
+  return arr;
+}
+
+async function runOnce(){
+  try{
+    info.textContent='Yüklənir...';
+    chart.textContent='Məlumat alınır...';
+    const pair=pairEl.value;
+    const method=methodEl.value;
+    const requestedWin=Math.max(2,parseInt(winEl.value)||20);
+    const key=avKeyEl.value.trim();
+    let data=[];
+    if(key){
+      try{data=await fetchAlphaIntraday(pair,key);}
+      catch(e){console.warn('AlphaVantage uğursuz oldu',e);
+        try{data=await fetchExchangerateHost(pair);}
+        catch(e2){console.warn('exchangerate.host uğursuz oldu',e2); data=await fetchFrankfurter(pair);}
+      }
+    } else {
+      try{data=await fetchExchangerateHost(pair);}
+      catch(e2){console.warn('exchangerate.host uğursuz oldu',e2); data=await fetchFrankfurter(pair);}
+    }
+    if(!data || data.length<2){info.textContent='Hesablama üçün kifayət qədər məlumat yoxdur'; chart.textContent='—'; return;}
+    
+    // Автоматическая подстройка окна
+    const win=Math.min(requestedWin, data.length);
+
+    const prices=data.map(d=>d.price);
+    let indicator=(method==='sma')?sma(prices,win):ema(prices,win);
+    const lastPrice=prices[prices.length-1];
+    const lastInd=indicator[indicator.length-1];
+    const delta=(lastPrice-lastInd)/lastInd;
+    const threshold=0.0015;
+    let signal='Neytral';
+    if(delta>threshold) signal='Yuxarı ↑';
+    else if(delta<-threshold) signal='Aşağı ↓';
+    
+    chart.textContent=`Nöqtələr: ${prices.length}. Son qiymət: ${lastPrice.toFixed(6)} — İndikator(${method.toUpperCase()}, ${win}) = ${lastInd.toFixed(6)}`;
+    info.innerHTML=`<b>${pair}</b>: ${lastPrice.toFixed(6)} USD — İndikator = ${lastInd.toFixed(6)} → <b>${signal}</b> (delta ${(delta*100).toFixed(3)}%)`;
+  } catch(err){console.error(err); info.textContent='Xəta: '+err.message; chart.textContent='—';}
+}
+
+runBtn.addEventListener('click', runOnce);
+autoBtn.addEventListener('click',()=>{
+  auto=!auto;
+  autoBtn.textContent=auto?'Avto: açıq':'Avto: bağlı';
+  if(auto){runOnce(); autoInterval=setInterval(runOnce,30000);}
+  else clearInterval(autoInterval);
+});
+</script>
+</body>
+</html>
+
+
+
+AWHQY0L6ZTKJOECM
